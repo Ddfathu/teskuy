@@ -1,19 +1,19 @@
 FROM node:18-alpine
 
-# Install wget dan libc6-compat agar binary cloudflared bisa jalan tanpa error
-RUN apk add --no-cache wget libc6-compat
+# Install dependency dasar Alpine buat compatibility binary cloudflared
+RUN apk add --no-cache wget libc6-compat gcompat
 
 WORKDIR /app
 
-# Salin file package json untuk install modul ws
+# Copy package.json dan install dependency (otomatis ngerun postinstall download cloudflared)
 COPY package*.json ./
 RUN npm install --production
 
-# Salin seluruh sisa file script ke dalam container
+# Copy seluruh sisa file script
 COPY . .
 
-# Beri akses eksekusi ke file script shell argo
-RUN chmod +x entrypoint.sh
+# Expose port (opsional buat dokumentasi container)
+EXPOSE 8080
 
-# Eksekusi server via entrypoint
-ENTRYPOINT ["./entrypoint.sh"]
+# Jalankan aplikasi via npm start
+CMD ["npm", "start"]
