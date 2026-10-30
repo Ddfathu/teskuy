@@ -1,14 +1,16 @@
 // ============================================
 // DDFATHUVLES GATEWAY - BLUE CYBERPUNK UI TEMPLATE
 // REAL-TIME IP MONITORING & DYNAMIC TRAFFIC METRICS
-// Terpisah agar Aman dan Mudah Diedit Modifikasi
+// (SUPPORT BUG SNI, BUG CDN, & CDNFRONTED + NETMOD READY)
 // ============================================
 
 function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = [], visitorIP = '', downloadMB = '128.4', uploadMB = '96.2') {
+  // Ambil murni hostname (tanpa port) untuk SNI / Host default
+  const hostName = currentHost.split(':')[0];
+
   // Generate HTML untuk daftar IP aktif
   let ipListHTML = '';
   if (ipList.length === 0) {
-    // Jika tidak ada koneksi VPN tapi lu lagi buka web, tampilin IP lu sendiri
     ipListHTML = `<div class="text-[11px] text-blue-400/70 py-1 font-mono">● ${visitorIP || '127.0.0.1'} <span class="text-emerald-400 font-bold">(You)</span></div>`;
   } else {
     ipList.forEach(ip => {
@@ -77,7 +79,7 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       </div>
     </div>
 
-    <!-- TRAFFIC METRICS (DYNAMIC VALUES FROM SERVER) -->
+    <!-- TRAFFIC METRICS -->
     <div class="grid grid-cols-2 gap-3">
       <div class="card-blue p-4 rounded-xl">
         <p class="text-[10px] text-blue-400 font-bold tracking-wider">DOWNLOAD</p>
@@ -106,49 +108,77 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
     </div>
 
     <!-- CONFIG CONTROL BOX -->
-    <div class="card-blue p-4 rounded-xl space-y-4">
+    <div class="card-blue p-4 rounded-xl space-y-3">
       <div class="grid grid-cols-2 gap-2 text-xs">
         <div>
-          <label class="text-[10px] text-blue-400 font-bold block mb-1">UUID/PASS</label>
+          <label class="text-[10px] text-blue-400 font-bold block mb-1">UUID / PASS</label>
           <input id="uuidInput" type="text" value="853b8456-0c0b-4bfa-b3b4-b2619248a9bc" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
         </div>
         <div>
-          <label class="text-[10px] text-blue-400 font-bold block mb-1">HOST DOMAIN</label>
-          <input id="hostInput" type="text" value="${currentHost}" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+          <label class="text-[10px] text-blue-400 font-bold block mb-1">PORT</label>
+          <select id="portSelect" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+            <option value="443" selected>443 (TLS)</option>
+            <option value="80">80 (HTTP)</option>
+          </select>
         </div>
       </div>
 
-      <!-- KOLOM INPUT BUG HOST KHUSUS -->
-      <div>
-        <label class="text-[10px] text-blue-400 font-bold block mb-1">BUG HOST (SNI / CDN)</label>
-        <input id="bugInput" type="text" value="sony.line.me" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div>
+          <label class="text-[10px] text-blue-400 font-bold block mb-1">SERVER TUNNEL HOST</label>
+          <input id="hostInput" type="text" value="${hostName}" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+        </div>
+        <div>
+          <label class="text-[10px] text-blue-400 font-bold block mb-1">WS PATH</label>
+          <input id="pathInput" type="text" value="/direk" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+        </div>
       </div>
 
-      <div class="space-y-2">
+      <!-- KOLOM INPUT BUG HOST -->
+      <div>
+        <label class="text-[10px] text-blue-400 font-bold block mb-1">BUG HOST / TARGET IP</label>
+        <input id="bugInput" type="text" value="suporte.garena.com" placeholder="Contoh: suporte.garena.com" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+      </div>
+
+      <!-- ROW 1: BUG SNI -->
+      <div class="space-y-1.5">
         <div class="border-l-2 border-blue-500 pl-2">
-          <p class="text-[11px] font-bold text-blue-200 tracking-wider">BUG SNI</p>
+          <p class="text-[10px] font-bold text-blue-200 tracking-wider">BUG SNI</p>
         </div>
         <div class="grid grid-cols-2 gap-2">
-          <button onclick="buildConfig('vless', 'sni')" class="btn-blue py-2 rounded-lg text-xs font-bold tracking-widest transition-all">VLESS</button>
-          <button onclick="buildConfig('trojan', 'sni')" class="btn-blue py-2 rounded-lg text-xs font-bold tracking-widest transition-all">TROJAN</button>
+          <button onclick="buildConfig('vless', 'sni')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">VLESS</button>
+          <button onclick="buildConfig('trojan', 'sni')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">TROJAN</button>
         </div>
       </div>
 
-      <div class="space-y-2">
+      <!-- ROW 2: BUG CDN -->
+      <div class="space-y-1.5">
         <div class="border-l-2 border-blue-500 pl-2">
-          <p class="text-[11px] font-bold text-blue-200 tracking-wider">BUG CDN</p>
+          <p class="text-[10px] font-bold text-blue-200 tracking-wider">BUG CDN</p>
         </div>
         <div class="grid grid-cols-3 gap-2">
-          <button onclick="buildConfig('vless', 'cdn')" class="btn-blue py-2 rounded-lg text-xs font-bold tracking-widest transition-all">VLESS</button>
-          <button onclick="buildConfig('vmess', 'cdn')" class="btn-blue py-2 rounded-lg text-xs font-bold tracking-widest transition-all">VMESS</button>
-          <button onclick="buildConfig('trojan', 'cdn')" class="btn-blue py-2 rounded-lg text-xs font-bold tracking-widest transition-all">TROJAN</button>
+          <button onclick="buildConfig('vless', 'cdn')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">VLESS</button>
+          <button onclick="buildConfig('vmess', 'cdn')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">VMESS</button>
+          <button onclick="buildConfig('trojan', 'cdn')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">TROJAN</button>
+        </div>
+      </div>
+
+      <!-- ROW 3: CDNFRONTED -->
+      <div class="space-y-1.5">
+        <div class="border-l-2 border-blue-500 pl-2">
+          <p class="text-[10px] font-bold text-blue-200 tracking-wider">CDNFRONTED</p>
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <button onclick="buildConfig('vless', 'fronted')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">VLESS</button>
+          <button onclick="buildConfig('vmess', 'fronted')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">VMESS</button>
+          <button onclick="buildConfig('trojan', 'fronted')" class="btn-blue py-1.5 rounded-lg text-xs font-bold tracking-widest transition-all">TROJAN</button>
         </div>
       </div>
 
       <div id="output-area" class="hidden space-y-1.5 bg-[#040610] p-3 rounded-lg border border-blue-950">
         <div class="flex justify-between items-center">
           <span id="out-type" class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-500 text-white">VLESS</span>
-          <button onclick="copyOutConfig()" class="text-[10px] text-blue-400 font-bold hover:underline">COPY</button>
+          <button id="copyBtn" onclick="copyOutConfig()" class="text-[10px] text-blue-400 font-bold hover:underline">COPY</button>
         </div>
         <p id="configText" class="text-[11px] font-mono text-blue-100 break-all bg-black/40 p-2 rounded border border-blue-950 max-h-24 overflow-y-auto">Loading...</p>
       </div>
@@ -198,38 +228,95 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       });
     }, 1000);
 
-    function buildConfig(protocol, type) {
+    function buildConfig(protocol, mode) {
       document.querySelectorAll('button').forEach(b => b.classList.remove('btn-active'));
-      if(event) event.target.classList.add('btn-active');
+      if(event && event.target) event.target.classList.add('btn-active');
       
       const uuid = document.getElementById('uuidInput').value.trim();
       const host = document.getElementById('hostInput').value.trim();
-      const bugHost = document.getElementById('bugInput').value.trim();
+      const bugHost = document.getElementById('bugInput').value.trim() || host;
+      const port = document.getElementById('portSelect').value;
+      const path = document.getElementById('pathInput').value.trim() || '/';
+      const isTls = port === '443';
+      
       const area = document.getElementById('output-area');
       const label = document.getElementById('out-type');
       const txt = document.getElementById('configText');
 
-      let sniBug = type === 'sni' ? bugHost : host;
-      let pathBug = type === 'cdn' ? '/' + bugHost : '/DIREK';
-      let remark = 'DDFATHU-' + protocol.toUpperCase() + '-' + type.toUpperCase();
+      let serverAddr = host;
+      let sniName = host;
+      let headerHost = host;
+      let pathVal = path;
+      let remark = 'DDFATHU-' + protocol.toUpperCase() + '-' + mode.toUpperCase() + '-' + port;
+
+      if (mode === 'sni') {
+        serverAddr = host;
+        sniName = bugHost;
+        headerHost = bugHost;
+      } else if (mode === 'cdn') {
+        serverAddr = host;
+        sniName = host;
+        headerHost = host;
+        pathVal = path.startsWith('/') ? path : '/' + path;
+      } else if (mode === 'fronted') {
+        // Mode CDNFronted untuk Netmod / DarkTunnel
+        serverAddr = bugHost;
+        sniName = host;
+        headerHost = host;
+      }
+
+      label.innerText = protocol.toUpperCase() + ' (' + mode.toUpperCase() + ')';
       let configResult = '';
-      label.innerText = protocol.toUpperCase();
       
       if(protocol === 'vless') {
-        configResult = 'vless://' + uuid + '@' + host + ':443?encryption=none&security=tls&sni=' + sniBug + '&fp=randomized&type=ws&host=' + host + '&path=' + encodeURIComponent(pathBug) + '#' + encodeURIComponent(remark);
+        configResult = 'vless://' + uuid + '@' + serverAddr + ':' + port + '?encryption=none&security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=ws&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
       } else if(protocol === 'vmess') {
-        let jsonVmess = { v: "2", ps: remark, add: host, port: "443", id: uuid, aid: "0", scy: "none", net: "ws", type: "none", host: host, path: pathBug, tls: "tls", sni: sniBug };
+        let jsonVmess = { v: "2", ps: remark, add: serverAddr, port: port, id: uuid, aid: "0", scy: "zero", net: "ws", type: "none", host: headerHost, path: pathVal, tls: isTls ? "tls" : "", sni: sniName };
         configResult = 'vmess://' + btoa(JSON.stringify(jsonVmess));
       } else if(protocol === 'trojan') {
-        configResult = 'trojan://' + uuid + '@' + host + ':443?security=tls&sni=' + sniBug + '&type=ws&host=' + host + '&path=' + encodeURIComponent(pathBug) + '#' + encodeURIComponent(remark);
+        configResult = 'trojan://' + uuid + '@' + serverAddr + ':' + port + '?security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=ws&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
       }
+
       txt.innerText = configResult;
       area.classList.remove('hidden');
     }
 
+    // Fungsi Copy Universal
     function copyOutConfig() {
-      navigator.clipboard.writeText(document.getElementById('configText').innerText);
-      alert('Config Berhasil Disalin!');
+      const text = document.getElementById('configText').innerText;
+      
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(showCopied).catch(fallbackCopy);
+      } else {
+        fallbackCopy();
+      }
+
+      function fallbackCopy() {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-999999px";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        try {
+          document.execCommand('copy');
+          showCopied();
+        } catch (err) {
+          alert('Gagal menyalin text');
+        }
+        document.body.removeChild(textArea);
+      }
+
+      function showCopied() {
+        const btn = document.getElementById('copyBtn');
+        btn.innerText = 'COPIED!';
+        btn.classList.add('text-emerald-400');
+        setTimeout(() => {
+          btn.innerText = 'COPY';
+          btn.classList.remove('text-emerald-400');
+        }, 1500);
+      }
     }
   </script>
 </body>
