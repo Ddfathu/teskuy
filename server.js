@@ -1,22 +1,19 @@
 // ============================================
-// RAILWAY GATEWAY - UNIVERSAL DIRECT HIGH-PERFORMANCE
-// MODULAR VERSION (REAL-TIME UNIQUE IP & DATA TRAFFIC MONITORING)
-// Ready to Deploy - Node.js
+// DDFATHUVLES GATEWAY - SERVER ENGINE
+// INTEGRATED CLOUDFLARED SPAWNER & API TUNNEL DETECTOR
 // ============================================
 
 const WebSocket = require('ws');
 const net = require('net');
 const dgram = require('dgram');
 const http = require('http');
-const https = require('https');
 const url = require('url');
-const { generateUI } = require('./ui'); // MEMANGGIL FILE UI TERPISAH LU
+const { spawn } = require('child_process');
+const { generateUI } = require('./ui');
 
-// Constants Murni Bawaan Lu
+// Protocol Markers
 const horse = Buffer.from("dHJvamFu", 'base64').toString(); // "trojan"
-const flash = Buffer.from("dm1lc3M=", 'base64').toString(); // "vmess"
-const v2 = Buffer.from("djJyYXk=", 'base64').toString(); // "v2ray"
-const neko = Buffer.from("Y2xhc2g=", 'base64').toString(); // "clash"
+const flash = Buffer.from("dm1lc3M=", 'base64').toString(); // "vless / vmess"
 
 const CORS_HEADER_OPTIONS = {
   "Access-Control-Allow-Origin": "*",
@@ -32,20 +29,51 @@ class GatewayServer {
     this.CORS_HEADER_OPTIONS = CORS_HEADER_OPTIONS;
     this.totalVisits = 0;
     
-    // PEMICU REAL METRICS: Mulai dari nilai awal visual biar gak nol banget
+    // Counter Traffic Data
     this.totalDownloadBytes = 128400000; // 128.4 MB awal
     this.totalUploadBytes = 96200000;   // 96.2 MB awal
+
+    // Tempat menyimpan URL Tunnel Cloudflare terbaru
+    this.currentTunnelUrl = '';
   }
 
-  // ==================== HTTP HANDLERS & UI INJECTOR ====================
+  // ==================== CLOUDFLARED RUNNER ====================
+  startCloudflared(targetPort) {
+    console.log('[Tunnel] Spawning cloudflared quick tunnel...');
+    
+    // Panggil binary ./cloudflared yang ada di root repo
+    const cf = spawn('./cloudflared', ['tunnel', '--url', `http://localhost:${targetPort}`]);
+
+    const captureUrl = (data) => {
+      const str = data.toString();
+      console.log(`[cloudflared] ${str.trim()}`);
+      
+      // RegEx nangkep URL trycloudflare.com
+      const match = str.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
+      if (match) {
+        this.currentTunnelUrl = match[0];
+        console.log(`\n==============================================`);
+        console.log(`🚀 QUICK TUNNEL URL DETECTED: ${this.currentTunnelUrl}`);
+        console.log(`==============================================\n`);
+      }
+    };
+
+    cf.stdout.on('data', captureUrl);
+    cf.stderr.on('data', captureUrl);
+
+    cf.on('close', (code) => {
+      console.log(`[Tunnel] cloudflared process exited with code ${code}`);
+    });
+  }
+
+  // ==================== HTTP HANDLERS & API ====================
   handleHealthCheck(req, res) {
     const healthData = {
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      service: 'railway-gateway',
+      service: 'ddfathuvles-gateway',
       uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      features: { websocket: true, tcp: true, udp: true }
+      tunnel: this.currentTunnelUrl || 'pending'
     };
     res.writeHead(200, { 'Content-Type': 'application/json', ...this.CORS_HEADER_OPTIONS });
     res.end(JSON.stringify(healthData, null, 2));
@@ -56,17 +84,20 @@ class GatewayServer {
     if (req.method === 'OPTIONS') { res.writeHead(200, this.CORS_HEADER_OPTIONS); res.end(); return; }
     if (parsedUrl.pathname === '/health') { this.handleHealthCheck(req, res); return; }
     
+    // API Endpoint khusus buat UI ngambil URL Tunnel aktif
+    if (parsedUrl.pathname === '/api/tunnel') {
+      res.writeHead(200, { 'Content-Type': 'application/json', ...this.CORS_HEADER_OPTIONS });
+      res.end(JSON.stringify({ url: this.currentTunnelUrl }));
+      return;
+    }
+
     if (parsedUrl.pathname === '/') {
       this.totalVisits++;
       
       const currentHost = req.headers.host || 'localhost:3000';
       const uptime = Math.floor(process.uptime());
       
-      // ========================================================
-      // REAL-TIME: MENGHITUNG DAN MENGAMBIL DAFTAR IP AKTIF
-      // ========================================================
       const activeIPs = new Set();
-      
       if (this.wss && this.wss.clients) {
         this.wss.clients.forEach(client => {
           if (client.readyState === WebSocket.OPEN && client.remoteRealIP) {
@@ -78,17 +109,13 @@ class GatewayServer {
       const ipList = Array.from(activeIPs);
       const onlineClients = ipList.length || 1;
       
-      // Deteksi IP publik browser lu saat ini untuk penanda "(You)"
       let visitorIP = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket.remoteAddress || '';
       if (visitorIP.includes(',')) visitorIP = visitorIP.split(',')[0].trim();
 
-      // Mengubah byte data terakumulasi menjadi satuan MB yang dinamis
       const downloadMB = (this.totalDownloadBytes / (1024 * 1024)).toFixed(1);
       const uploadMB = (this.totalUploadBytes / (1024 * 1024)).toFixed(1);
 
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      
-      // KIRIM DATA KE UI BESERTA PARAMETER TAMBAHAN DATA MB NYATA
       res.end(generateUI(currentHost, uptime, onlineClients, this.totalVisits, ipList, visitorIP, downloadMB, uploadMB));
       return;
     }
@@ -97,9 +124,8 @@ class GatewayServer {
     res.end('Not Found');
   }
 
-  // ==================== WEBSOCKET HANDLERS (MURNI 1000% LOGIKA SAKTI LU) ====================
+  // ==================== WEBSOCKET HANDLERS ====================
   async handleWebSocketConnection(ws, request) {
-    console.log(`WebSocket universal handshake connected via path: ${url.parse(request.url).pathname}`);
     await this.websocketHandler(ws);
   }
 
@@ -111,8 +137,6 @@ class GatewayServer {
     ws.on('message', async (message) => {
       try {
         const chunk = Buffer.from(message);
-        
-        // AKUMULASI DATA UPLOAD (Setiap ada paket masuk dari klien VPN lu)
         this.totalUploadBytes += chunk.length;
 
         if (remoteSocketWrapper.value) { remoteSocketWrapper.value.write(chunk); return; }
@@ -156,7 +180,7 @@ class GatewayServer {
   async handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log) {
     try {
       const s = net.createConnection({ host: addressRemote, port: portRemote }, () => {
-        log(`pure direct connection established to ${addressRemote}:${portRemote}`);
+        log(`direct connection established to ${addressRemote}:${portRemote}`);
         s.write(rawClientData);
       });
       remoteSocket.value = s;
@@ -175,15 +199,12 @@ class GatewayServer {
         this.activeUDPConnections.set(key, { socket: sock, webSocket });
         sock.on('error', () => { try{sock.close()}catch(_){} this.activeUDPConnections.delete(key); });
         
-        // AKUMULASI DATA UPLOAD PADA JALUR UDP
         this.totalUploadBytes += dataChunk.length;
         
         sock.send(dataChunk, targetPort, targetAddress, (e) => { if(e){ try{sock.close()}catch(_){} this.activeUDPConnections.delete(key); } });
         sock.on('message', (msg) => {
           if (webSocket.readyState === WebSocket.OPEN) {
-            // AKUMULASI DATA DOWNLOAD PADA JALUR UDP RESPONS
             this.totalDownloadBytes += msg.length;
-            
             if (header) { webSocket.send(Buffer.concat([Buffer.from(header), msg])); header = null; }
             else webSocket.send(msg);
           }
@@ -245,7 +266,6 @@ class GatewayServer {
     remoteSocket.on('data', (chunk) => {
       if (webSocket.readyState !== WebSocket.OPEN) { remoteSocket.destroy(); return; }
       
-      // AKUMULASI DATA DOWNLOAD (Setiap kali server menerima respons dari internet luar)
       this.totalDownloadBytes += chunk.length;
 
       if (header) { webSocket.send(Buffer.concat([Buffer.from(header), chunk])); header = null; }
@@ -257,18 +277,20 @@ class GatewayServer {
     const server = http.createServer((req, res) => { this.handleHttpRequest(req, res).catch(() => {}); });
     this.wss = new WebSocket.Server({ server, perMessageDeflate: false });
     
-    // MENANGKAP IP PUBLIK ASLI DARITUNNEL SAAT JABAT TANGAN (HANDSHAKE)
     this.wss.on('connection', (ws, req) => {
       let clientIP = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket.remoteAddress || '';
       if (clientIP.includes(',')) {
         clientIP = clientIP.split(',')[0].trim();
       }
-      ws.remoteRealIP = clientIP; // Simpan IP asli unik ke objek ws
-      
+      ws.remoteRealIP = clientIP;
       this.handleWebSocketConnection(ws, req);
     });
     
-    server.listen(port, '0.0.0.0', () => { this.httpServer = server; });
+    server.listen(port, '0.0.0.0', () => { 
+      this.httpServer = server;
+      // Otomatis spawn cloudflared begitu HTTP server listening
+      this.startCloudflared(port);
+    });
   }
 }
 

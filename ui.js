@@ -1,14 +1,11 @@
 // ============================================
 // DDFATHUVLES GATEWAY - BLUE CYBERPUNK UI TEMPLATE
-// REAL-TIME IP MONITORING & DYNAMIC TRAFFIC METRICS
-// (SUPPORT BUG SNI, BUG CDN, & CDNFRONTED + NETMOD READY)
+// REAL-TIME IP MONITORING, DYNAMIC TRAFFIC METRICS & AUTO-TUNNEL DETECTOR
 // ============================================
 
 function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = [], visitorIP = '', downloadMB = '128.4', uploadMB = '96.2') {
-  // Ambil murni hostname (tanpa port) untuk SNI / Host default
   const hostName = currentHost.split(':')[0];
 
-  // Generate HTML untuk daftar IP aktif
   let ipListHTML = '';
   if (ipList.length === 0) {
     ipListHTML = `<div class="text-[11px] text-blue-400/70 py-1 font-mono">● ${visitorIP || '127.0.0.1'} <span class="text-emerald-400 font-bold">(You)</span></div>`;
@@ -228,6 +225,20 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       });
     }, 1000);
 
+    // AUTO-FETCH TUNNEL URL DARI API SERVER
+    window.addEventListener('DOMContentLoaded', () => {
+      fetch('/api/tunnel')
+        .then(res => res.json())
+        .then(data => {
+          if (data && data.url) {
+            let cleanDomain = data.url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+            const hostInput = document.getElementById('hostInput');
+            if (hostInput) hostInput.value = cleanDomain;
+          }
+        })
+        .catch(err => console.log('Tunnel API fetch error:', err));
+    });
+
     function buildConfig(protocol, mode) {
       document.querySelectorAll('button').forEach(b => b.classList.remove('btn-active'));
       if(event && event.target) event.target.classList.add('btn-active');
@@ -259,7 +270,6 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
         headerHost = host;
         pathVal = path.startsWith('/') ? path : '/' + path;
       } else if (mode === 'fronted') {
-        // Mode CDNFronted untuk Netmod / DarkTunnel
         serverAddr = bugHost;
         sniName = host;
         headerHost = host;
@@ -281,7 +291,6 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       area.classList.remove('hidden');
     }
 
-    // Fungsi Copy Universal
     function copyOutConfig() {
       const text = document.getElementById('configText').innerText;
       
