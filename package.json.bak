@@ -1,0 +1,17 @@
+{
+  "name": "railway-gateway",
+  "version": "1.0.0",
+  "description": "Proxy Gateway Universal Direct dengan Cloudflare Argo Tunnel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "author": "Kuncung",
+  "license": "MIT"
+}

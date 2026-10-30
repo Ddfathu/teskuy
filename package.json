@@ -4,7 +4,8 @@
   "description": "Proxy Gateway Universal Direct dengan Cloudflare Argo Tunnel",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "postinstall": "curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x cloudflared",
+    "start": "./cloudflared tunnel --url http://localhost:${PORT:-8080} & node server.js"
   },
   "dependencies": {
     "ws": "^8.14.2"
