@@ -133,7 +133,7 @@ class GatewayServer {
       const uploadMB = (this.totalUploadBytes / (1024 * 1024)).toFixed(1);
 
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(generateUI(currentHost, uptime, onlineClients, this.totalVisits, ipList, visitorIP, downloadMB, uploadMB));
+      res.end(generateUI(currentHost, uptime, onlineClients, this.totalVisits, ipList, visitorIP, downloadMB, uploadMB, this.currentTunnelUrl));
       return;
     }
     

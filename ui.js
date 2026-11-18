@@ -3,8 +3,9 @@
 // REAL-TIME IP MONITORING, DYNAMIC TRAFFIC METRICS & AUTO-TUNNEL DETECTOR
 // ============================================
 
-function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = [], visitorIP = '', downloadMB = '128.4', uploadMB = '96.2') {
+function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = [], visitorIP = '', downloadMB = '128.4', uploadMB = '96.2', tunnelUrl = '') {
   const hostName = currentHost.split(':')[0];
+  const tunnelDomain = (tunnelUrl || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 
   let ipListHTML = '';
   if (ipList.length === 0) {
@@ -112,7 +113,7 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
           <button id="copyTunnelBtn" onclick="copyTunnelUrl()" class="text-[10px] text-blue-400 font-bold hover:underline">COPY</button>
         </div>
       </div>
-      <input id="tunnelUrlInput" type="text" readonly value="Mendeteksi tunnel..." class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono text-xs focus:outline-none">
+      <input id="tunnelUrlInput" type="text" readonly value="${tunnelDomain ? tunnelUrl : 'Mendeteksi tunnel...'}" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono text-xs focus:outline-none">
       <p class="text-[9px] text-blue-500 leading-relaxed">URL tunnel Cloudflare aktif. Dipakai sebagai host config kalau domain PaaS-nya bukan domain Cloudflare. URL ini berubah tiap server restart.</p>
     </div>
 
@@ -137,7 +138,7 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
           <label class="text-[10px] text-blue-400 font-bold block mb-1">SERVER TUNNEL HOST</label>
           <select id="hostInput" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
             <option value="${hostName}" selected>Asli: ${hostName}</option>
-            <option id="hostTunnelOption" value="" disabled>CF Quick: mendeteksi...</option>
+            <option id="hostTunnelOption" value="${tunnelDomain}" ${tunnelDomain ? '' : 'disabled'}>${tunnelDomain ? 'CF Quick: ' + tunnelDomain : 'CF Quick: mendeteksi...'}</option>
           </select>
         </div>
         <div>
@@ -243,7 +244,7 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
     // AUTO-FETCH TUNNEL URL DARI API SERVER — ditampilkan di kolom CLOUDFLARE TUNNEL URL
     // Polling jalan terus tiap 10 detik sampai URL tunnel ketemu (halaman yang kebuka
     // pas server lagi restart tetap bakal keisi sendiri begitu tunnel-nya siap).
-    let detectedTunnelUrl = '';
+    let detectedTunnelUrl = "${tunnelUrl}";
     function pollTunnelUrl() {
       fetch('/api/tunnel')
         .then(res => res.json())
