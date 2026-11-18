@@ -10,6 +10,7 @@ const http = require('http');
 const url = require('url');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { generateUI } = require('./ui');
 
@@ -82,6 +83,392 @@ class RawStreamAdapter extends EventEmitter {
   }
 }
 
+// =====================================================================
+// VMess AEAD server support (protocol as implemented by Xray-core:
+// proxy/vmess/aead + proxy/vmess/encoding, replicated exactly).
+// VMess encrypts everything with a key derived from the UUID, so unlike
+// VLESS it cannot accept arbitrary UUIDs: the accepted UUIDs come from
+// the VMESS_UUID env var (comma separated) and default to the UI UUID.
+// =====================================================================
+
+function sha256HashObj() {
+    let h = crypto.createHash('sha256');
+    return {
+        write(d) { h.update(d); },
+        sum() { return h.copy().digest(); },
+        reset() { h = crypto.createHash('sha256'); }
+    };
+}
+
+// Faithful port of Go's crypto/hmac (needed because the VMess KDF nests
+// HMACs in a way plain HMAC composition does not reproduce).
+class GoHmac {
+    constructor(newHash, key) {
+        this.outer = newHash();
+        this.inner = newHash();
+        let k = Buffer.from(key);
+        if (k.length > 64) { this.outer.write(k); k = this.outer.sum(); }
+        this.ipad = Buffer.alloc(64, 0x36);
+        this.opad = Buffer.alloc(64, 0x5c);
+        for (let i = 0; i < k.length; i++) { this.ipad[i] ^= k[i]; this.opad[i] ^= k[i]; }
+        this.inner.write(this.ipad);
+    }
+    write(d) { this.inner.write(d); }
+    sum() {
+        const digest = this.inner.sum();
+        this.outer.reset();
+        this.outer.write(this.opad);
+        this.outer.write(digest);
+        return this.outer.sum();
+    }
+    reset() { this.inner.reset(); this.inner.write(this.ipad); }
+}
+
+function vmessKDF(key, paths) {
+    let cur = new GoHmac(sha256HashObj, Buffer.from('VMess AEAD KDF', 'utf8'));
+    for (const p of paths) {
+        const prev = cur;
+        const pbuf = Buffer.isBuffer(p) ? p : Buffer.from(p, 'utf8');
+        let calls = 0;
+        cur = new GoHmac(() => {
+            calls++;
+            return calls === 1
+                ? { write: d => prev.write(d), sum: () => prev.sum(), reset: () => prev.reset() }
+                : prev;
+        }, pbuf);
+    }
+    cur.write(Buffer.from(key));
+    return cur.sum();
+}
+const vmessKDF16 = (key, paths) => vmessKDF(key, paths).slice(0, 16);
+
+const CRC32_TABLE = (() => {
+    const t = [];
+    for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        t[n] = c >>> 0;
+    }
+    return t;
+})();
+function crc32IEEE(buf) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < buf.length; i++) c = CRC32_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function fnv1a32(buf) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < buf.length; i++) { h ^= buf[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+    return h >>> 0;
+}
+function chacha20Key(b16) {
+    const a = crypto.createHash('md5').update(b16).digest();
+    const b = crypto.createHash('md5').update(a).digest();
+    return Buffer.concat([a, b]);
+}
+function aeadSeal(kind, key, nonce, plaintext, aad) {
+    const c = kind === 'gcm'
+        ? crypto.createCipheriv('aes-128-gcm', key, nonce, { authTagLength: 16 })
+        : crypto.createCipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 });
+    if (aad && aad.length) c.setAAD(aad);
+    const ct = Buffer.concat([c.update(plaintext), c.final()]);
+    return Buffer.concat([ct, c.getAuthTag()]);
+}
+function aeadOpen(kind, key, nonce, data, aad) {
+    const tag = data.slice(data.length - 16);
+    const ct = data.slice(0, data.length - 16);
+    const d = kind === 'gcm'
+        ? crypto.createDecipheriv('aes-128-gcm', key, nonce, { authTagLength: 16 })
+        : crypto.createDecipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 });
+    if (aad && aad.length) d.setAAD(aad);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(ct), d.final()]);
+}
+function chunkNonceGen(iv16) {
+    const c = Buffer.from(iv16);
+    let count = 0;
+    return () => {
+        c.writeUInt16BE(count & 0xFFFF, 0);
+        count++;
+        return Buffer.from(c.slice(0, 12));
+    };
+}
+class ShakeStream {
+    constructor(iv) {
+        this.buf = crypto.createHash('shake128', { outputLength: 1 << 17 }).update(iv).digest();
+        this.off = 0;
+    }
+    next16() {
+        if (this.off + 2 > this.buf.length) throw new Error('shake stream exhausted');
+        const v = this.buf.readUInt16BE(this.off);
+        this.off += 2;
+        return v;
+    }
+    nextPadding() { return this.next16() % 64; }
+}
+
+// One direction of the VMess chunk stream (size parser + AEAD + padding),
+// mirroring Xray's AuthenticationWriter/Reader option handling.
+class VmessChunkCodec {
+    constructor(security, bodyKey, bodyIV, option) {
+        this.kind = security; // 'gcm' | 'chacha'
+        this.dataKey = security === 'gcm' ? bodyKey : chacha20Key(bodyKey);
+        this.dataNonce = chunkNonceGen(bodyIV);
+        this.authLen = !!(option & 0x10);
+        this.masking = !!(option & 0x04);
+        this.globalPadding = !!(option & 0x08);
+        if (this.authLen) {
+            const lk = vmessKDF16(bodyKey, ['auth_len']);
+            this.lenKey = security === 'gcm' ? lk : chacha20Key(lk);
+            this.lenNonce = chunkNonceGen(bodyIV);
+        }
+        if (this.masking) this.shake = new ShakeStream(bodyIV);
+        this.sizeBytes = this.authLen ? 18 : 2;
+    }
+    decodeSize(raw) {
+        if (this.authLen) {
+            const p = aeadOpen(this.kind, this.lenKey, this.lenNonce(), raw, null);
+            return p.readUInt16BE(0);
+        }
+        const v = raw.readUInt16BE(0);
+        return this.masking ? (v ^ this.shake.next16()) : v;
+    }
+    takePadding() { return this.globalPadding ? this.shake.nextPadding() : 0; }
+    encodeChunk(payload) {
+        const paddingSize = this.globalPadding ? this.shake.nextPadding() : 0;
+        const sizeVal = payload.length + 16 + paddingSize;
+        let sizeField;
+        if (this.authLen) {
+            const sb = Buffer.alloc(2);
+            sb.writeUInt16BE(sizeVal, 0);
+            sizeField = aeadSeal(this.kind, this.lenKey, this.lenNonce(), sb, null);
+        } else if (this.masking) {
+            sizeField = Buffer.alloc(2);
+            sizeField.writeUInt16BE(sizeVal ^ this.shake.next16(), 0);
+        } else {
+            sizeField = Buffer.alloc(2);
+            sizeField.writeUInt16BE(sizeVal, 0);
+        }
+        const sealed = aeadSeal(this.kind, this.dataKey, this.dataNonce(), payload, null);
+        return paddingSize > 0
+            ? Buffer.concat([sizeField, sealed, crypto.randomBytes(paddingSize)])
+            : Buffer.concat([sizeField, sealed]);
+    }
+    openChunk(sealed) { return aeadOpen(this.kind, this.dataKey, this.dataNonce(), sealed, null); }
+}
+
+class VmessSession {
+    constructor(gateway, ws, clientIP, user) {
+        this.gateway = gateway;
+        this.ws = ws;
+        this.clientIP = clientIP;
+        this.user = user; // { uuid, cmdKey }
+        this.inBuf = Buffer.alloc(0);
+        this.headerDone = false;
+        this.closed = false;
+        this.respHeaderSent = false;
+        this.finalSent = false;
+        this.remote = null;
+        this.remoteReady = false;
+        this.pendingPlain = [];
+        this.decState = 'size';
+        this.curSize = 0;
+        this.curPadding = 0;
+    }
+
+    feed(chunk) {
+        if (this.closed) return;
+        this.inBuf = this.inBuf.length ? Buffer.concat([this.inBuf, chunk]) : chunk;
+        try {
+            if (!this.headerDone) this.parseHeader();
+            if (this.headerDone) this.pumpChunks();
+        } catch (e) {
+            console.log('[VMess] session error: ' + e.message);
+            this.close();
+        }
+    }
+
+    parseHeader() {
+        const buf = this.inBuf;
+        if (buf.length < 42) return; // authID(16) + encLen(18) + nonce(8)
+        const authID = buf.slice(0, 16);
+        const cmdKey = this.user.cmdKey;
+        const encLen = buf.slice(16, 34);
+        const nonce = buf.slice(34, 42);
+        const lenKey = vmessKDF16(cmdKey, ['VMess Header AEAD Key_Length', authID, nonce]);
+        const lenNonce = vmessKDF(cmdKey, ['VMess Header AEAD Nonce_Length', authID, nonce]).slice(0, 12);
+        const lenPlain = aeadOpen('gcm', lenKey, lenNonce, encLen, authID);
+        const headerLen = lenPlain.readUInt16BE(0);
+        const total = 42 + headerLen + 16;
+        if (buf.length < total) return;
+        const payKey = vmessKDF16(cmdKey, ['VMess Header AEAD Key', authID, nonce]);
+        const payNonce = vmessKDF(cmdKey, ['VMess Header AEAD Nonce', authID, nonce]).slice(0, 12);
+        const p = aeadOpen('gcm', payKey, payNonce, buf.slice(42, total), authID);
+        this.inBuf = buf.slice(total);
+
+        if (p[0] !== 1) throw new Error('bad vmess version');
+        this.bodyIV = p.slice(1, 17);
+        this.bodyKey = p.slice(17, 33);
+        this.respByte = p[33];
+        this.option = p[34];
+        const secByte = p[35];
+        const paddingLen = secByte >> 4;
+        const secType = secByte & 0x0F;
+        if (secType === 3) this.security = 'gcm';
+        else if (secType === 4) this.security = 'chacha';
+        else throw new Error('unsupported vmess security ' + secType);
+        this.command = p[37];
+        if (this.command !== 1 && this.command !== 2) throw new Error('unsupported vmess command ' + this.command);
+        this.port = p.readUInt16BE(38);
+        const at = p[40];
+        let idx = 41;
+        if (at === 1) { this.host = Array.from(p.slice(idx, idx + 4)).join('.'); idx += 4; }
+        else if (at === 2) { const l = p[idx]; this.host = p.slice(idx + 1, idx + 1 + l).toString('utf8'); idx += 1 + l; }
+        else if (at === 3) {
+            const parts = [];
+            for (let i = 0; i < 8; i++) parts.push(p.readUInt16BE(idx + i * 2).toString(16));
+            this.host = parts.join(':'); idx += 16;
+        } else throw new Error('bad vmess address type ' + at);
+        const end = idx + paddingLen;
+        if (p.length < end + 4) throw new Error('short vmess header');
+        if (fnv1a32(p.slice(0, end)) !== p.readUInt32BE(end)) throw new Error('vmess header checksum mismatch');
+
+        this.dec = new VmessChunkCodec(this.security, this.bodyKey, this.bodyIV, this.option);
+        const respBodyKey = crypto.createHash('sha256').update(this.bodyKey).digest().slice(0, 16);
+        const respBodyIV = crypto.createHash('sha256').update(this.bodyIV).digest().slice(0, 16);
+        this.respBodyKey = respBodyKey;
+        this.respBodyIV = respBodyIV;
+        this.enc = new VmessChunkCodec(this.security, respBodyKey, respBodyIV, this.option);
+        this.headerDone = true;
+        console.log(`[VMess] ${this.command === 2 ? 'UDP' : 'TCP'} -> ${this.host}:${this.port} (${this.security}, opt=0x${this.option.toString(16)})`);
+        if (this.command === 2) this.startUDP();
+        else this.startTCP();
+    }
+
+    sendResponseHeader() {
+        if (this.respHeaderSent) return;
+        this.respHeaderSent = true;
+        const plain = Buffer.from([this.respByte, 0x00, 0x00, 0x00]);
+        const lenKey = vmessKDF16(this.respBodyKey, ['AEAD Resp Header Len Key']);
+        const lenIV = vmessKDF(this.respBodyIV, ['AEAD Resp Header Len IV']).slice(0, 12);
+        const payKey = vmessKDF16(this.respBodyKey, ['AEAD Resp Header Key']);
+        const payIV = vmessKDF(this.respBodyIV, ['AEAD Resp Header IV']).slice(0, 12);
+        const lenBuf = Buffer.alloc(2);
+        lenBuf.writeUInt16BE(plain.length, 0);
+        const out = Buffer.concat([
+            aeadSeal('gcm', lenKey, lenIV, lenBuf, null),
+            aeadSeal('gcm', payKey, payIV, plain, null)
+        ]);
+        this.sendRaw(out);
+    }
+
+    sendRaw(buf) {
+        if (this.closed) return;
+        this.gateway.totalDownloadBytes += buf.length;
+        try { this.ws.send(buf); } catch (e) { /* socket gone */ }
+    }
+
+    sendBody(data) {
+        this.sendResponseHeader();
+        if (this.command === 2) {
+            this.sendRaw(this.enc.encodeChunk(data));
+            return;
+        }
+        const MAXP = 8000;
+        for (let off = 0; off < data.length; off += MAXP) {
+            this.sendRaw(this.enc.encodeChunk(data.slice(off, off + MAXP)));
+        }
+    }
+
+    sendFinal() {
+        if (this.finalSent || this.closed) return;
+        this.finalSent = true;
+        this.sendResponseHeader();
+        this.sendRaw(this.enc.encodeChunk(Buffer.alloc(0)));
+    }
+
+    pumpChunks() {
+        while (!this.closed) {
+            if (this.decState === 'size') {
+                if (this.inBuf.length < this.dec.sizeBytes) return;
+                const raw = this.inBuf.slice(0, this.dec.sizeBytes);
+                this.curPadding = this.dec.takePadding();
+                this.curSize = this.dec.decodeSize(raw);
+                this.inBuf = this.inBuf.slice(this.dec.sizeBytes);
+                if (this.curSize === 16 + this.curPadding) { this.onClientEOF(); return; }
+                if (this.curSize < 16 + this.curPadding || this.curSize > 65535) throw new Error('bad chunk size ' + this.curSize);
+                this.decState = 'data';
+            }
+            if (this.decState === 'data') {
+                if (this.inBuf.length < this.curSize) return;
+                const raw = this.inBuf.slice(0, this.curSize);
+                this.inBuf = this.inBuf.slice(this.curSize);
+                const plain = this.dec.openChunk(raw.slice(0, this.curSize - this.curPadding));
+                this.decState = 'size';
+                this.onPlain(plain);
+            }
+        }
+    }
+
+    onPlain(plain) {
+        if (this.command === 2) {
+            if (this.udpSock) {
+                this.udpSock.send(plain, this.port, this.host, (err) => { if (err) console.log('[VMess] UDP send: ' + err.message); });
+            }
+            return;
+        }
+        if (this.remoteReady && this.remote) this.remote.write(plain);
+        else this.pendingPlain.push(plain);
+    }
+
+    onClientEOF() {
+        if (this.command === 1 && this.remote && !this.remote.destroyed) {
+            try { this.remote.end(); } catch (e) { /* ignore */ }
+        }
+        if (this.command === 2) this.close();
+    }
+
+    startTCP() {
+        const gateway = this.gateway;
+        const remote = net.createConnection({ host: this.host, port: this.port }, () => {
+            this.remoteReady = true;
+            this.sendResponseHeader();
+            if (this.pendingPlain.length) {
+                for (const b of this.pendingPlain) remote.write(b);
+                this.pendingPlain = [];
+            }
+        });
+        this.remote = remote;
+        remote.on('data', (d) => { this.sendBody(d); });
+        remote.on('error', (err) => {
+            console.log(`[VMess] remote ${this.host}:${this.port}: ${err.message}`);
+            this.sendFinal();
+            this.close();
+        });
+        remote.on('close', () => { this.sendFinal(); this.close(); });
+    }
+
+    startUDP() {
+        const fam = net.isIPv6(this.host) ? 'udp6' : 'udp4';
+        const sock = dgram.createSocket(fam);
+        this.udpSock = sock;
+        sock.on('message', (msg) => { this.sendBody(msg); });
+        sock.on('error', (err) => { console.log('[VMess] UDP socket: ' + err.message); });
+        try { sock.bind(0); } catch (e) { /* bind errors surface via 'error' */ }
+        this.sendResponseHeader();
+    }
+
+    close() {
+        if (this.closed) return;
+        this.closed = true;
+        if (this.remote) { try { this.remote.destroy(); } catch (e) { /* ignore */ } this.remote = null; }
+        if (this.udpSock) { try { this.udpSock.close(); } catch (e) { /* ignore */ } this.udpSock = null; }
+        if (this.ws.readyState === 1 || this.ws.readyState === 0) {
+            try { this.ws.close(1000); } catch (e) { /* ignore */ }
+        }
+    }
+}
+
 class GatewayServer {
   constructor() {
     this.wss = null;
@@ -97,6 +484,39 @@ class GatewayServer {
 
     // Tempat menyimpan URL Tunnel Cloudflare terbaru
     this.currentTunnelUrl = '';
+
+    // VMess users: cmdKey = MD5(uuidBytes || "c48619fe-8f02-49e0-b9e9-edf763e17e21")
+    const vmessUuids = (process.env.VMESS_UUID || '853b8456-0c0b-4bfa-b3b4-b2619248a9bc')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    this.vmessUsers = [];
+    for (const u of vmessUuids) {
+      const hex = u.replace(/-/g, '');
+      if (!/^[0-9a-fA-F]{32}$/.test(hex)) continue;
+      const uuidBytes = Buffer.from(hex, 'hex');
+      const cmdKey = crypto.createHash('md5')
+        .update(Buffer.concat([uuidBytes, Buffer.from('c48619fe-8f02-49e0-b9e9-edf763e17e21', 'utf8')]))
+        .digest();
+      this.vmessUsers.push({ uuid: u, cmdKey });
+    }
+  }
+
+  // Coba cocokkan 16 byte pertama sebagai VMess AuthID: dekripsi AES-ECB
+  // pakai kunci turunan cmdKey, cek CRC32 + jendela waktu +-120 detik.
+  matchVmessAuthID(authID) {
+    for (const user of this.vmessUsers) {
+      try {
+        const aesKey = vmessKDF16(user.cmdKey, ['AES Auth ID Encryption']);
+        const d = crypto.createDecipheriv('aes-128-ecb', aesKey, null);
+        d.setAutoPadding(false);
+        const dec = Buffer.concat([d.update(authID), d.final()]);
+        if (crc32IEEE(dec.slice(0, 12)) !== dec.readUInt32BE(12)) continue;
+        const ts = Number(dec.readBigInt64BE(0));
+        if (ts < 0) continue;
+        if (Math.abs(ts - Math.floor(Date.now() / 1000)) > 120) continue;
+        return user;
+      } catch (e) { /* lanjut ke user berikutnya */ }
+    }
+    return null;
   }
 
   // ==================== CLOUDFLARED RUNNER ====================
@@ -218,6 +638,8 @@ class GatewayServer {
     let addressLog = "", portLog = "";
     const log = (info, event) => console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
     let remoteSocketWrapper = { value: null };
+    let vmessSession = null;
+    let vmessDecided = false;
 
     // State khusus stream mentah (HTTPUpgrade): sesi UDP berjalan di atas
     // stream, paketnya dibingkai prefix panjang 2 byte (khusus VLESS).
@@ -237,6 +659,24 @@ class GatewayServer {
       try {
         const chunk = Buffer.from(message);
         this.totalUploadBytes += chunk.length;
+
+        // Sesi VMess yang sudah jalan: semua chunk berikutnya miliknya.
+        if (vmessSession) { vmessSession.feed(chunk); return; }
+
+        // Deteksi VMess AEAD dari AuthID (16 byte pertama) — harus sebelum
+        // sniffer lain karena header VMess terenkripsi dan tampak acak.
+        if (!vmessDecided) {
+          vmessDecided = true;
+          if (chunk.length >= 16) {
+            const vmUser = this.matchVmessAuthID(chunk.slice(0, 16));
+            if (vmUser) {
+              const ip = (ws._socket && ws._socket.remoteAddress) || (ws.socket && ws.socket.remoteAddress) || '';
+              vmessSession = new VmessSession(this, ws, ip, vmUser);
+              vmessSession.feed(chunk);
+              return;
+            }
+          }
+        }
 
         // Stream mentah yang sesinya UDP: semua byte lanjutan milik sesi UDP.
         if (rawUdpSession) {
@@ -295,8 +735,8 @@ class GatewayServer {
       ws.on('message', processChunk);
     }
 
-    ws.on('close', () => { if (remoteSocketWrapper.value) remoteSocketWrapper.value.end(); this.cleanupUDPConnections(ws); });
-    ws.on('error', () => this.cleanupUDPConnections(ws));
+    ws.on('close', () => { if (vmessSession) vmessSession.close(); if (remoteSocketWrapper.value) remoteSocketWrapper.value.end(); this.cleanupUDPConnections(ws); });
+    ws.on('error', () => { if (vmessSession) vmessSession.close(); this.cleanupUDPConnections(ws); });
   }
 
   // UDP di atas stream mentah (HTTPUpgrade): satu socket UDP per sesi ke

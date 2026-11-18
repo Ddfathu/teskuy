@@ -351,7 +351,7 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       if(protocol === 'vless') {
         configResult = 'vless://' + uuid + '@' + serverAddr + ':' + port + '?encryption=none&security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=' + transport + '&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
       } else if(protocol === 'vmess') {
-        let jsonVmess = { v: "2", ps: remark, add: serverAddr, port: port, id: uuid, aid: "0", scy: "zero", net: transport, type: "none", host: headerHost, path: pathVal, tls: isTls ? "tls" : "", sni: sniName };
+        let jsonVmess = { v: "2", ps: remark, add: serverAddr, port: port, id: uuid, aid: "0", scy: "auto", net: transport, type: "none", host: headerHost, path: pathVal, tls: isTls ? "tls" : "", sni: sniName };
         configResult = 'vmess://' + btoa(JSON.stringify(jsonVmess));
       } else if(protocol === 'trojan') {
         configResult = 'trojan://' + uuid + '@' + serverAddr + ':' + port + '?security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=' + transport + '&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
