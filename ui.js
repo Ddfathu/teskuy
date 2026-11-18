@@ -147,6 +147,14 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
         </div>
       </div>
 
+      <div class="text-xs">
+        <label class="text-[10px] text-blue-400 font-bold block mb-1">TRANSPORT</label>
+        <select id="transportSelect" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+          <option value="ws" selected>WebSocket (WS)</option>
+          <option value="httpupgrade">HTTPUpgrade (h2up)</option>
+        </select>
+      </div>
+
       <!-- KOLOM INPUT BUG HOST -->
       <div>
         <label class="text-[10px] text-blue-400 font-bold block mb-1">BUG HOST / TARGET IP</label>
@@ -308,6 +316,7 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       const host = document.getElementById('hostInput').value.trim();
       const bugHost = document.getElementById('bugInput').value.trim() || host;
       const port = document.getElementById('portSelect').value;
+      const transport = document.getElementById('transportSelect').value;
       const path = document.getElementById('pathInput').value.trim() || '/';
       const isTls = port === '443';
       
@@ -340,12 +349,12 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       let configResult = '';
       
       if(protocol === 'vless') {
-        configResult = 'vless://' + uuid + '@' + serverAddr + ':' + port + '?encryption=none&security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=ws&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
+        configResult = 'vless://' + uuid + '@' + serverAddr + ':' + port + '?encryption=none&security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=' + transport + '&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
       } else if(protocol === 'vmess') {
-        let jsonVmess = { v: "2", ps: remark, add: serverAddr, port: port, id: uuid, aid: "0", scy: "zero", net: "ws", type: "none", host: headerHost, path: pathVal, tls: isTls ? "tls" : "", sni: sniName };
+        let jsonVmess = { v: "2", ps: remark, add: serverAddr, port: port, id: uuid, aid: "0", scy: "zero", net: transport, type: "none", host: headerHost, path: pathVal, tls: isTls ? "tls" : "", sni: sniName };
         configResult = 'vmess://' + btoa(JSON.stringify(jsonVmess));
       } else if(protocol === 'trojan') {
-        configResult = 'trojan://' + uuid + '@' + serverAddr + ':' + port + '?security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=ws&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
+        configResult = 'trojan://' + uuid + '@' + serverAddr + ':' + port + '?security=' + (isTls ? 'tls' : 'none') + '&sni=' + sniName + '&type=' + transport + '&host=' + headerHost + '&path=' + encodeURIComponent(pathVal) + '#' + encodeURIComponent(remark);
       }
 
       txt.innerText = configResult;
