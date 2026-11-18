@@ -109,7 +109,6 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       <div class="flex justify-between items-center">
         <label class="text-[10px] text-blue-400 font-bold block">CLOUDFLARE TUNNEL URL</label>
         <div class="flex gap-3">
-          <button onclick="useTunnelHost()" class="text-[10px] text-blue-400 font-bold hover:underline">PAKAI SBG HOST</button>
           <button id="copyTunnelBtn" onclick="copyTunnelUrl()" class="text-[10px] text-blue-400 font-bold hover:underline">COPY</button>
         </div>
       </div>
@@ -136,7 +135,10 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       <div class="grid grid-cols-2 gap-2 text-xs">
         <div>
           <label class="text-[10px] text-blue-400 font-bold block mb-1">SERVER TUNNEL HOST</label>
-          <input id="hostInput" type="text" value="${hostName}" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+          <select id="hostInput" class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono focus:outline-none focus:border-blue-500">
+            <option value="${hostName}" selected>Asli: ${hostName}</option>
+            <option id="hostTunnelOption" value="" disabled>CF Quick: mendeteksi...</option>
+          </select>
         </div>
         <div>
           <label class="text-[10px] text-blue-400 font-bold block mb-1">WS PATH</label>
@@ -250,6 +252,13 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
           if (data && data.url) {
             detectedTunnelUrl = data.url;
             if (el) el.value = data.url;
+            const opt = document.getElementById('hostTunnelOption');
+            if (opt) {
+              let cleanDomain = data.url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+              opt.value = cleanDomain;
+              opt.textContent = 'CF Quick: ' + cleanDomain;
+              opt.disabled = false;
+            }
           } else {
             setTimeout(pollTunnelUrl, 10000);
           }
@@ -260,13 +269,6 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
         });
     }
     window.addEventListener('DOMContentLoaded', () => pollTunnelUrl());
-
-    function useTunnelHost() {
-      if (!detectedTunnelUrl) return;
-      let cleanDomain = detectedTunnelUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-      const hostInput = document.getElementById('hostInput');
-      if (hostInput) hostInput.value = cleanDomain;
-    }
 
     function copyTunnelUrl() {
       if (!detectedTunnelUrl) return;
