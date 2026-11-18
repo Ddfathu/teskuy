@@ -104,6 +104,19 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       </div>
     </div>
 
+    <!-- CLOUDFLARE TUNNEL URL -->
+    <div class="card-blue p-4 rounded-xl space-y-2">
+      <div class="flex justify-between items-center">
+        <label class="text-[10px] text-blue-400 font-bold block">CLOUDFLARE TUNNEL URL</label>
+        <div class="flex gap-3">
+          <button onclick="useTunnelHost()" class="text-[10px] text-blue-400 font-bold hover:underline">PAKAI SBG HOST</button>
+          <button id="copyTunnelBtn" onclick="copyTunnelUrl()" class="text-[10px] text-blue-400 font-bold hover:underline">COPY</button>
+        </div>
+      </div>
+      <input id="tunnelUrlInput" type="text" readonly value="Mendeteksi tunnel..." class="w-full bg-[#060917] border border-blue-900 rounded p-1.5 text-white font-mono text-xs focus:outline-none">
+      <p class="text-[9px] text-blue-500 leading-relaxed">URL tunnel Cloudflare aktif. Dipakai sebagai host config kalau domain PaaS-nya bukan domain Cloudflare. URL ini berubah tiap server restart.</p>
+    </div>
+
     <!-- CONFIG CONTROL BOX -->
     <div class="card-blue p-4 rounded-xl space-y-3">
       <div class="grid grid-cols-2 gap-2 text-xs">
@@ -225,19 +238,63 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
       });
     }, 1000);
 
-    // AUTO-FETCH TUNNEL URL DARI API SERVER
-    window.addEventListener('DOMContentLoaded', () => {
+    // AUTO-FETCH TUNNEL URL DARI API SERVER — ditampilkan di kolom CLOUDFLARE TUNNEL URL
+    let detectedTunnelUrl = '';
+    function pollTunnelUrl(tries) {
       fetch('/api/tunnel')
         .then(res => res.json())
         .then(data => {
+          const el = document.getElementById('tunnelUrlInput');
           if (data && data.url) {
-            let cleanDomain = data.url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-            const hostInput = document.getElementById('hostInput');
-            if (hostInput) hostInput.value = cleanDomain;
+            detectedTunnelUrl = data.url;
+            if (el) el.value = data.url;
+          } else if (tries > 0) {
+            setTimeout(() => pollTunnelUrl(tries - 1), 5000);
+          } else if (el) {
+            el.value = 'Tunnel belum terdeteksi';
           }
         })
-        .catch(err => console.log('Tunnel API fetch error:', err));
-    });
+        .catch(err => {
+          console.log('Tunnel API fetch error:', err);
+          if (tries > 0) setTimeout(() => pollTunnelUrl(tries - 1), 5000);
+        });
+    }
+    window.addEventListener('DOMContentLoaded', () => pollTunnelUrl(24));
+
+    function useTunnelHost() {
+      if (!detectedTunnelUrl) return;
+      let cleanDomain = detectedTunnelUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      const hostInput = document.getElementById('hostInput');
+      if (hostInput) hostInput.value = cleanDomain;
+    }
+
+    function copyTunnelUrl() {
+      if (!detectedTunnelUrl) return;
+      const btn = document.getElementById('copyTunnelBtn');
+      const done = () => {
+        if (!btn) return;
+        btn.innerText = 'COPIED!';
+        btn.classList.add('text-emerald-400');
+        setTimeout(() => { btn.innerText = 'COPY'; btn.classList.remove('text-emerald-400'); }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(detectedTunnelUrl).then(done).catch(() => fallbackTunnelCopy(done));
+      } else {
+        fallbackTunnelCopy(done);
+      }
+    }
+
+    function fallbackTunnelCopy(done) {
+      const textArea = document.createElement("textarea");
+      textArea.value = detectedTunnelUrl;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try { document.execCommand('copy'); done(); } catch (err) { alert('Gagal menyalin text'); }
+      document.body.removeChild(textArea);
+    }
 
     function buildConfig(protocol, mode) {
       document.querySelectorAll('button').forEach(b => b.classList.remove('btn-active'));
