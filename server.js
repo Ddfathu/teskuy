@@ -9,6 +9,7 @@ const dgram = require('dgram');
 const http = require('http');
 const url = require('url');
 const { spawn } = require('child_process');
+const fs = require('fs');
 const { generateUI } = require('./ui');
 
 // Protocol Markers
@@ -40,9 +41,25 @@ class GatewayServer {
   // ==================== CLOUDFLARED RUNNER ====================
   startCloudflared(targetPort) {
     console.log('[Tunnel] Spawning cloudflared quick tunnel...');
-    
+
+    // Binary di repo terkomit tanpa permission execute (mode 100644) —
+    // coba perbaiki dulu supaya spawn tidak EACCES di PaaS mana pun.
+    try { fs.chmodSync('./cloudflared', 0o755); } catch (e) { /* abaikan, error handler di bawah yang jaga */ }
+
     // Panggil binary ./cloudflared yang ada di root repo
-    const cf = spawn('./cloudflared', ['tunnel', '--url', `http://localhost:${targetPort}`]);
+    let cf;
+    try {
+      cf = spawn('./cloudflared', ['tunnel', '--url', `http://localhost:${targetPort}`]);
+    } catch (err) {
+      console.log(`[Tunnel] Gagal spawn cloudflared: ${err.message} — server tetap jalan tanpa quick tunnel.`);
+      return;
+    }
+
+    // WAJIB ada: tanpa handler ini, error spawn (EACCES/ENOENT) jadi
+    // unhandled 'error' event dan MEMBUNUH seluruh proses Node.
+    cf.on('error', (err) => {
+      console.log(`[Tunnel] cloudflared error: ${err.message} — server tetap jalan tanpa quick tunnel.`);
+    });
 
     const captureUrl = (data) => {
       const str = data.toString();
