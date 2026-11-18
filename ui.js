@@ -239,8 +239,10 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
     }, 1000);
 
     // AUTO-FETCH TUNNEL URL DARI API SERVER — ditampilkan di kolom CLOUDFLARE TUNNEL URL
+    // Polling jalan terus tiap 10 detik sampai URL tunnel ketemu (halaman yang kebuka
+    // pas server lagi restart tetap bakal keisi sendiri begitu tunnel-nya siap).
     let detectedTunnelUrl = '';
-    function pollTunnelUrl(tries) {
+    function pollTunnelUrl() {
       fetch('/api/tunnel')
         .then(res => res.json())
         .then(data => {
@@ -248,18 +250,16 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
           if (data && data.url) {
             detectedTunnelUrl = data.url;
             if (el) el.value = data.url;
-          } else if (tries > 0) {
-            setTimeout(() => pollTunnelUrl(tries - 1), 5000);
-          } else if (el) {
-            el.value = 'Tunnel belum terdeteksi';
+          } else {
+            setTimeout(pollTunnelUrl, 10000);
           }
         })
         .catch(err => {
           console.log('Tunnel API fetch error:', err);
-          if (tries > 0) setTimeout(() => pollTunnelUrl(tries - 1), 5000);
+          setTimeout(pollTunnelUrl, 10000);
         });
     }
-    window.addEventListener('DOMContentLoaded', () => pollTunnelUrl(24));
+    window.addEventListener('DOMContentLoaded', () => pollTunnelUrl());
 
     function useTunnelHost() {
       if (!detectedTunnelUrl) return;
