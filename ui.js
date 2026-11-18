@@ -255,7 +255,8 @@ function generateUI(currentHost, uptime, onlineClients, totalVisits, ipList = []
             if (el) el.value = data.url;
             const opt = document.getElementById('hostTunnelOption');
             if (opt) {
-              let cleanDomain = data.url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+              let cleanDomain = data.url.replace('https://', '').replace('http://', '');
+              if (cleanDomain.endsWith('/')) cleanDomain = cleanDomain.slice(0, -1);
               opt.value = cleanDomain;
               opt.textContent = 'CF Quick: ' + cleanDomain;
               opt.disabled = false;

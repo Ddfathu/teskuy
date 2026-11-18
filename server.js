@@ -10,6 +10,7 @@ const http = require('http');
 const url = require('url');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const { EventEmitter } = require('events');
 const { generateUI } = require('./ui');
 
 // Protocol Markers
@@ -22,9 +23,69 @@ const CORS_HEADER_OPTIONS = {
   "Access-Control-Max-Age": "86400",
 };
 
+// ==================== HTTPUPGRADE RAW STREAM ADAPTER ====================
+// HTTPUpgrade (h2up) bukan WebSocket beneran: handshake 101 tanpa
+// Sec-WebSocket-Key, habis itu data jalan sebagai raw TCP stream tanpa
+// frame WS. Adapter ini membungkus socket mentah itu supaya terlihat
+// seperti koneksi `ws` di mata handler gateway yang sudah ada
+// (on('message'|'close'|'error'), send(), close(), readyState).
+class RawStreamAdapter extends EventEmitter {
+  constructor(socket) {
+    super();
+    this.socket = socket;
+    this.readyState = 1; // WebSocket.OPEN
+    this.isRawStream = true;
+    this.remoteRealIP = '';
+    this._firstChunks = [];
+    this._firstBytes = 0;
+    this._firstFlushed = false;
+    this._flushTimer = null;
+
+    socket.on('data', (chunk) => {
+      if (!this._firstFlushed) {
+        // Chunk pertama ditahan sebentar: header protokol di stream mentah
+        // bisa kepotong beberapa segmen TCP. Kumpulkan sampai >=128 byte
+        // atau 30ms sejak byte pertama, baru lempar sebagai 'message'.
+        this._firstChunks.push(chunk);
+        this._firstBytes += chunk.length;
+        if (!this._flushTimer) this._flushTimer = setTimeout(() => this._flushFirst(), 30);
+        if (this._firstBytes >= 128) this._flushFirst();
+        return;
+      }
+      this.emit('message', chunk);
+    });
+    socket.on('close', () => { this.readyState = 3; this.emit('close'); });
+    socket.on('error', (err) => { this.readyState = 3; this.emit('error', err); });
+  }
+
+  _flushFirst() {
+    if (this._firstFlushed) return;
+    this._firstFlushed = true;
+    if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = null; }
+    if (this._firstChunks.length) {
+      const buf = Buffer.concat(this._firstChunks);
+      this._firstChunks = [];
+      this.emit('message', buf);
+    }
+  }
+
+  send(data) {
+    if (this.readyState === 1 && !this.socket.destroyed) {
+      try { this.socket.write(data); } catch (_) {}
+    }
+  }
+
+  close() {
+    this.readyState = 3;
+    try { this.socket.end(); } catch (_) {}
+    try { this.socket.destroy(); } catch (_) {}
+  }
+}
+
 class GatewayServer {
   constructor() {
     this.wss = null;
+    this.rawClients = new Set();
     this.httpServer = null;
     this.activeUDPConnections = new Map();
     this.CORS_HEADER_OPTIONS = CORS_HEADER_OPTIONS;
@@ -122,6 +183,13 @@ class GatewayServer {
           }
         });
       }
+      if (this.rawClients) {
+        this.rawClients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN && client.remoteRealIP) {
+            activeIPs.add(client.remoteRealIP);
+          }
+        });
+      }
       
       const ipList = Array.from(activeIPs);
       const onlineClients = ipList.length || 1;
@@ -151,10 +219,35 @@ class GatewayServer {
     const log = (info, event) => console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
     let remoteSocketWrapper = { value: null };
 
-    ws.on('message', async (message) => {
+    // State khusus stream mentah (HTTPUpgrade): sesi UDP berjalan di atas
+    // stream, paketnya dibingkai prefix panjang 2 byte (khusus VLESS).
+    let rawUdpSession = null;
+    let rawUdpBuf = Buffer.alloc(0);
+    const drainRawUdpFrames = () => {
+      while (rawUdpBuf.length >= 2) {
+        const len = rawUdpBuf.readUInt16BE(0);
+        if (rawUdpBuf.length < 2 + len) break;
+        const packet = rawUdpBuf.slice(2, 2 + len);
+        rawUdpBuf = rawUdpBuf.slice(2 + len);
+        rawUdpSession.send(packet);
+      }
+    };
+
+    const processChunk = async (message) => {
       try {
         const chunk = Buffer.from(message);
         this.totalUploadBytes += chunk.length;
+
+        // Stream mentah yang sesinya UDP: semua byte lanjutan milik sesi UDP.
+        if (rawUdpSession) {
+          if (rawUdpSession.framed) {
+            rawUdpBuf = Buffer.concat([rawUdpBuf, chunk]);
+            drainRawUdpFrames();
+          } else {
+            rawUdpSession.send(chunk);
+          }
+          return;
+        }
 
         if (remoteSocketWrapper.value) { remoteSocketWrapper.value.write(chunk); return; }
 
@@ -171,6 +264,19 @@ class GatewayServer {
         if (protocolHeader.hasError) throw new Error(protocolHeader.message);
 
         if (protocolHeader.isUDP) {
+          if (ws.isRawStream) {
+            rawUdpSession = await this.handleRawUDPOutbound(ws, protocolHeader, log, protocol === flash);
+            const rest = protocolHeader.rawClientData;
+            if (rest && rest.length) {
+              if (rawUdpSession.framed) {
+                rawUdpBuf = Buffer.concat([rawUdpBuf, Buffer.from(rest)]);
+                drainRawUdpFrames();
+              } else {
+                rawUdpSession.send(Buffer.from(rest));
+              }
+            }
+            return;
+          }
           return await this.handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk.slice(protocolHeader.rawDataIndex), ws, protocolHeader.version, log);
         }
 
@@ -178,10 +284,64 @@ class GatewayServer {
       } catch (err) {
         ws.close(1011);
       }
-    });
+    };
+
+    if (ws.isRawStream) {
+      // Stream mentah wajib serial: chunk tidak boleh diproses paralel,
+      // urutan byte menentukan posisi header dan frame UDP.
+      let chain = Promise.resolve();
+      ws.on('message', (message) => { chain = chain.then(() => processChunk(message)).catch(() => {}); });
+    } else {
+      ws.on('message', processChunk);
+    }
 
     ws.on('close', () => { if (remoteSocketWrapper.value) remoteSocketWrapper.value.end(); this.cleanupUDPConnections(ws); });
     ws.on('error', () => this.cleanupUDPConnections(ws));
+  }
+
+  // UDP di atas stream mentah (HTTPUpgrade): satu socket UDP per sesi ke
+  // target dari header pertama. VLESS dibingkai prefix 2 byte dua arah;
+  // protokol lain diteruskan mentah seperti jalur WS.
+  async handleRawUDPOutbound(webSocket, protocolHeader, log, framed) {
+    const targetAddress = protocolHeader.addressRemote;
+    const targetPort = protocolHeader.portRemote;
+    const sock = dgram.createSocket('udp4');
+    const key = `raw:${targetAddress}:${targetPort}:${Date.now()}`;
+    this.activeUDPConnections.set(key, { socket: sock, webSocket });
+
+    let header = protocolHeader.version;
+    const session = {
+      framed: !!framed,
+      send: (packet) => {
+        try { sock.send(packet, targetPort, targetAddress, () => {}); } catch (_) {}
+      }
+    };
+
+    let idleTimer = null;
+    const armIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { try { sock.close(); } catch (_) {} }, 30000);
+    };
+    armIdleTimer();
+
+    sock.on('message', (msg) => {
+      armIdleTimer();
+      if (webSocket.readyState !== WebSocket.OPEN) return;
+      this.totalDownloadBytes += msg.length;
+      let out = msg;
+      if (session.framed) {
+        const lenBuf = Buffer.alloc(2);
+        lenBuf.writeUInt16BE(msg.length, 0);
+        out = Buffer.concat([lenBuf, msg]);
+      }
+      if (header) { webSocket.send(Buffer.concat([Buffer.from(header), out])); header = null; }
+      else webSocket.send(out);
+    });
+    sock.on('error', () => { try { sock.close(); } catch (_) {} this.activeUDPConnections.delete(key); });
+    sock.on('close', () => { if (idleTimer) clearTimeout(idleTimer); this.activeUDPConnections.delete(key); });
+
+    log(`raw UDP session to ${targetAddress}:${targetPort} (framed=${session.framed})`);
+    return session;
   }
 
   async protocolSniffer(buffer) {
@@ -292,8 +452,8 @@ class GatewayServer {
 
   start(port = process.env.PORT || 3000) {
     const server = http.createServer((req, res) => { this.handleHttpRequest(req, res).catch(() => {}); });
-    this.wss = new WebSocket.Server({ server, perMessageDeflate: false });
-    
+    this.wss = new WebSocket.Server({ noServer: true, perMessageDeflate: false });
+
     this.wss.on('connection', (ws, req) => {
       let clientIP = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket.remoteAddress || '';
       if (clientIP.includes(',')) {
@@ -301,6 +461,34 @@ class GatewayServer {
       }
       ws.remoteRealIP = clientIP;
       this.handleWebSocketConnection(ws, req);
+    });
+
+    // Routing upgrade manual: request DENGAN Sec-WebSocket-Key = WebSocket
+    // beneran (diteruskan ke library ws); TANPA key = HTTPUpgrade (h2up),
+    // handshake 101 dibalas sendiri lalu socket jalan sebagai raw stream.
+    server.on('upgrade', (req, socket, head) => {
+      const upgradeHeader = (req.headers.upgrade || '').toLowerCase();
+      if (upgradeHeader !== 'websocket') { try { socket.destroy(); } catch (_) {} return; }
+
+      if (req.headers['sec-websocket-key']) {
+        this.wss.handleUpgrade(req, socket, head, (ws) => this.wss.emit('connection', ws, req));
+        return;
+      }
+
+      try {
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+      } catch (_) { try { socket.destroy(); } catch (__) {} return; }
+
+      const adapter = new RawStreamAdapter(socket);
+      let clientIP = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket.remoteAddress || '';
+      if (clientIP.includes(',')) {
+        clientIP = clientIP.split(',')[0].trim();
+      }
+      adapter.remoteRealIP = clientIP;
+      this.rawClients.add(adapter);
+      adapter.on('close', () => this.rawClients.delete(adapter));
+      if (head && head.length) { try { socket.unshift(head); } catch (_) {} }
+      this.handleWebSocketConnection(adapter, req);
     });
     
     server.listen(port, '0.0.0.0', () => { 
